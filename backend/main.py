@@ -1,0 +1,170 @@
+import asyncio
+import json
+import logging
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).parent / ".env")
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import Response
+
+from .gemini_live_client import GeminiLiveClient
+from .audio_codec import gemini_pcm_to_twilio_payload, twilio_payload_to_gemini_pcm
+
+try:
+    from service.gotocloud_voicebot_tool import (
+        GOTOCLOUD_TOOLS,
+        SYSTEM_PROMPT,
+        ejecutar_tool,
+    )
+    logger_tmp = logging.getLogger(__name__)
+    logger_tmp.info(f"GoToCloud tools cargados: {len(GOTOCLOUD_TOOLS)} tools")
+except ImportError:
+    GOTOCLOUD_TOOLS = None
+    SYSTEM_PROMPT = None
+    ejecutar_tool = None
+    logging.getLogger(__name__).warning(
+        "service/gotocloud_voicebot_tool.py no encontrado — corriendo sin tools"
+    )
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+app = FastAPI(title="Twilio ↔ Gemini Live Bridge")
+
+TWIML_TEMPLATE = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Connect>
+    <Stream url="{stream_url}" />
+  </Connect>
+</Response>"""
+
+
+def _stream_url() -> str:
+    public_url = os.getenv("PUBLIC_URL", "").strip().rstrip("/")
+    if not public_url:
+        raise ValueError("PUBLIC_URL no está configurada en backend/.env")
+    for prefix in ("https://", "http://"):
+        if public_url.startswith(prefix):
+            return "wss://" + public_url[len(prefix):] + "/twilio-stream"
+    return public_url + "/twilio-stream"  # asume que ya es wss://
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
+@app.get("/twiml")
+@app.post("/twiml")
+async def twiml():
+    try:
+        stream_url = _stream_url()
+    except ValueError as exc:
+        return Response(content=str(exc), status_code=500, media_type="text/plain")
+    return Response(
+        content=TWIML_TEMPLATE.format(stream_url=stream_url),
+        media_type="application/xml",
+    )
+
+
+@app.websocket("/twilio-stream")
+async def twilio_stream(websocket: WebSocket):
+    await websocket.accept()
+    logger.info("Twilio connected")
+
+    gemini = GeminiLiveClient()
+    await gemini.connect(
+        tools=GOTOCLOUD_TOOLS,
+        tool_handler=ejecutar_tool,
+        system_instruction=SYSTEM_PROMPT,
+        voice_name="Aoede",
+    )
+    logger.info(f"Gemini Live connected — tools={'activos' if GOTOCLOUD_TOOLS else 'sin tools'}")
+
+    stream_sid: str | None = None
+    stop_event = asyncio.Event()
+
+    async def receive_from_twilio():
+        nonlocal stream_sid
+        try:
+            while not stop_event.is_set():
+                raw = await websocket.receive_text()
+                msg = json.loads(raw)
+                event = msg.get("event")
+
+                if event == "connected":
+                    logger.info("Twilio connected (protocol handshake)")
+
+                elif event == "start":
+                    stream_sid = msg["start"]["streamSid"]
+                    logger.info(f"Twilio start streamSid={stream_sid}")
+
+                elif event == "media":
+                    payload_b64 = msg["media"]["payload"]
+                    try:
+                        pcm = twilio_payload_to_gemini_pcm(payload_b64)
+                        logger.debug(f"Twilio media received bytes={len(pcm)}")
+                        await gemini.send_audio_pcm16_16k(pcm)
+                        logger.debug(f"sent to Gemini bytes={len(pcm)}")
+                    except Exception as exc:
+                        logger.warning(f"Audio conversion error (Twilio→Gemini): {exc}")
+
+                elif event == "stop":
+                    logger.info("Twilio stop")
+                    stop_event.set()
+                    break
+
+        except WebSocketDisconnect:
+            logger.info("Twilio WebSocket disconnected")
+            stop_event.set()
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.error(f"receive_from_twilio error: {exc}")
+            stop_event.set()
+
+    async def send_to_twilio():
+        try:
+            while not stop_event.is_set():
+                async for pcm_chunk in gemini.receive_audio():
+                    if stop_event.is_set():
+                        break
+                    if not stream_sid:
+                        logger.debug("Gemini audio recibido, streamSid aún no disponible — descartando")
+                        continue
+                    try:
+                        payload_b64 = gemini_pcm_to_twilio_payload(pcm_chunk, input_rate=24000)
+                        logger.info(f"Gemini audio received bytes={len(pcm_chunk)}, sent to Twilio")
+                        await websocket.send_text(json.dumps({
+                            "event": "media",
+                            "streamSid": stream_sid,
+                            "media": {"payload": payload_b64},
+                        }))
+                    except Exception as exc:
+                        logger.warning(f"Audio conversion error (Gemini→Twilio): {exc}")
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.error(f"send_to_twilio error: {exc}")
+            stop_event.set()
+
+    tasks = [
+        asyncio.create_task(receive_from_twilio(), name="twilio_recv"),
+        asyncio.create_task(send_to_twilio(), name="gemini_recv"),
+    ]
+    try:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await gemini.close()
+        logger.info("Gemini session closed")
