@@ -194,44 +194,48 @@ GOTOCLOUD_KB: dict[str, Any] = {
                 "oasis": {
                     "nombre": "OASIS AI",
                     "descripcion": (
-                        "Plataforma SaaS sobre Microsoft Azure que automatiza procesos con IA, "
-                        "extrae información de documentos no estructurados (facturas, contratos, "
-                        "correos, imágenes) y genera insights para la toma de decisiones."
+                        "Plataforma SaaS avanzada que automatiza procesos con IA, extrae información "
+                        "de documentos no estructurados (facturas, contratos, correos, imágenes) "
+                        "y genera insights para la toma de decisiones, utilizando tecnologías "
+                        "de Microsoft Azure, Azure OpenAI y Azure Cognitive Services."
                     ),
                     "para_quien": (
                         "Empresas del sector financiero, retail, legal, y cualquier organización "
                         "que gestione grandes volúmenes de documentos o datos no estructurados."
                     ),
                     "funcionalidades": [
-                        "Extracción automática de datos de documentos (facturas, contratos, reportes)",
-                        "Análisis de datos no estructurados con Azure Cognitive Search y Azure OpenAI",
-                        "Generación de resúmenes automáticos e identificación de tendencias",
-                        "Interfaz web Django intuitiva, sin conocimientos técnicos",
+                        "Automatización de procesos: extracción de información de documentos (facturas, contratos, reportes)",
+                        "Análisis avanzado de datos no estructurados con Azure Cognitive Search y Azure OpenAI",
+                        "Generación de insights: resúmenes automáticos, identificación de tendencias y recomendaciones",
+                        "Interfaz web intuitiva desarrollada con Django",
                     ],
                     "beneficios": [
-                        "40% de reducción en tiempo de gestión documental",
-                        "25-30% de disminución en costos operativos",
+                        "Mejora en la productividad: 40% de reducción en tiempo de gestión documental",
+                        "Optimización de recursos: 25-30% de disminución en costos operativos",
                         "Eliminación de entrada manual de datos y esfuerzos duplicados",
                         "Mejor ROI con decisiones basadas en datos reales",
                         "Escalable: crece con la empresa sin fricción",
                     ],
                     "seguridad": [
-                        "Autenticación multifactor (MFA)",
-                        "Cifrado AES-256",
-                        "Monitoreo con Azure Sentinel",
+                        "Autenticación multifactor (MFA) con Azure Active Directory B2C",
+                        "Cifrado AES-256 en tránsito y en reposo",
+                        "Monitoreo continuo con Azure Sentinel",
                         "Cumplimiento GDPR, CCPA y SOC 2",
                     ],
                 },
                 "dataloom": {
                     "nombre": "DataLoom",
                     "descripcion": (
-                        "Herramienta para orquestar datos empresariales de múltiples fuentes, "
-                        "permitiendo decisiones más inteligentes, seguras y escalables."
+                        "Solución SaaS potente para gestionar, buscar y acceder de manera eficiente "
+                        "a archivos almacenados en la nube, utilizando tecnologías de Azure para "
+                        "escalabilidad, seguridad y accesibilidad."
                     ),
                     "beneficios": [
-                        "Centralización de datos de múltiples fuentes",
-                        "Decisiones estratégicas basadas en información consolidada",
-                        "Escalabilidad con el crecimiento del negocio",
+                        "Gestión, búsqueda y acceso eficiente a archivos en la nube",
+                        "Indexación de metadatos para búsqueda avanzada (nombre, extensión, tipo, fecha)",
+                        "Integración con Azure Storage y Azure Active Directory B2C",
+                        "Implementación rápida (menos de 6 horas) y personalizable",
+                        "Disponibilidad del 99.95% respaldada por Azure",
                     ],
                 },
             },
