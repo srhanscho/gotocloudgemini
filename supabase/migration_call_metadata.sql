@@ -14,6 +14,24 @@ COMMENT ON COLUMN public.clientes.empresa   IS 'Empresa u organización del clie
 COMMENT ON COLUMN public.clientes.telefono  IS 'Teléfono de contacto del cliente';
 COMMENT ON COLUMN public.clientes.updated_at IS 'Última actualización del registro';
 
+-- 1b. Cédula única (idempotente: solo agrega si no existe)
+--     Primero limpia duplicados si los hay para evitar error
+UPDATE public.clientes
+SET cedula = cedula || '-dup-' || id
+WHERE cedula IN (
+    SELECT cedula FROM public.clientes
+    GROUP BY cedula HAVING COUNT(*) > 1
+);
+DO $$ BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'clientes_cedula_key'
+        AND connamespace = 'public'::regnamespace
+    ) THEN
+        ALTER TABLE public.clientes ADD CONSTRAINT clientes_cedula_key UNIQUE (cedula);
+    END IF;
+END $$;
+
 -- 2. Crear tabla llamadas
 CREATE TABLE IF NOT EXISTS public.llamadas (
     id                  SERIAL PRIMARY KEY,

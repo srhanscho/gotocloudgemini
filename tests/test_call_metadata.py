@@ -1,8 +1,9 @@
 """Tests para el sistema de metadata de llamadas (call-metadata).
 
 Cubre:
-- Tool `registrar_datos_cliente` con persistencia de empresa/teléfono
+- Tool `registrar_datos_cliente` con upsert por cédula única
 - Tool `registrar_resumen_llamada` con validación de parámetros
+- Cliente ya registrado vs nuevo
 - Fallback timeout (lógica de defaults)
 """
 
@@ -12,12 +13,141 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-# ── Mock Supabase ANTES de importar el módulo ──────────────────────
-mock_supabase = MagicMock()
-# Mock cadena: supabase.table("x").insert(y).execute() → data[0]["id"]
-mock_result = MagicMock()
-mock_result.data = [{"id": 42}]
-mock_supabase.table.return_value.insert.return_value.execute.return_value = mock_result
+# ── Mock Supabase inteligente ────────────────────────────────
+# Necesitamos un mock que maneje el flujo:
+#   1. select("id").eq("cedula", X).execute() → existente o vacío
+#   2. insert(row).execute() → nuevo ID
+#   3. update(row).eq("id", X).execute() → update existente
+
+
+class _FakeQuery:
+    """Simula una query chain de Supabase: table → select/insert/update → eq → execute."""
+
+    def __init__(self, return_data=None):
+        self._return_data = return_data or []
+
+    def select(self, *args, **kwargs):
+        return self
+
+    def insert(self, *args, **kwargs):
+        return self
+
+    def update(self, *args, **kwargs):
+        return self
+
+    def eq(self, *args, **kwargs):
+        return self
+
+    def execute(self):
+        return MagicMock(data=self._return_data)
+
+
+class _FakeQueryLlamadas(_FakeQuery):
+    """Query especializada para la tabla llamadas."""
+
+    def __init__(self, fake_supabase: _FakeSupabase):
+        super().__init__([])
+        self._fake = fake_supabase
+        self._method = None
+        self._insert_data = None
+
+    def select(self, *args, **kwargs):
+        self._method = "select"
+        return self
+
+    def insert(self, data):
+        self._method = "insert"
+        self._insert_data = data
+        return self
+
+    def eq(self, *args, **kwargs):
+        return self
+
+    def execute(self):
+        if self._method == "insert":
+            lid = self._fake._next_llamada_id
+            self._fake._next_llamada_id += 1
+            self._fake._llamadas[lid] = dict(self._insert_data)
+            return MagicMock(data=[{"id": lid}])
+        return MagicMock(data=[])
+
+
+class _FakeSupabase:
+    """Simula supabase con estado interno para upsert."""
+
+    def __init__(self):
+        self._clientes: dict[str, dict] = {}
+        self._llamadas: dict[str, dict] = {}
+        self._next_id = 1
+        self._next_llamada_id = 1
+
+    def table(self, name: str) -> _FakeQuery:
+        if name == "clientes":
+            return _FakeQueryClientes(self)
+        if name == "llamadas":
+            return _FakeQueryLlamadas(self)
+        return _FakeQuery([])
+
+
+class _FakeQueryClientes(_FakeQuery):
+    """Query especializada para la tabla clientes con upsert real."""
+
+    def __init__(self, fake_supabase: _FakeSupabase):
+        super().__init__([])
+        self._fake = fake_supabase
+        self._method = None
+        self._eq_field = None
+        self._eq_value = None
+        self._insert_data = None
+        self._update_data = None
+        self._update_id = None
+
+    def select(self, *args, **kwargs):
+        self._method = "select"
+        return self
+
+    def insert(self, data):
+        self._method = "insert"
+        self._insert_data = data
+        return self
+
+    def update(self, data):
+        self._method = "update"
+        self._update_data = data
+        return self
+
+    def eq(self, field, value):
+        if self._method == "select":
+            self._eq_field = field
+            self._eq_value = value
+        elif self._method == "update":
+            self._update_id = value
+        return self
+
+    def execute(self):
+        if self._method == "select" and self._eq_field == "cedula":
+            # Buscar por cédula
+            for cid, rec in self._fake._clientes.items():
+                if rec["cedula"] == self._eq_value:
+                    return MagicMock(data=[{"id": cid}])
+            return MagicMock(data=[])
+
+        if self._method == "insert":
+            cid = self._fake._next_id
+            self._fake._next_id += 1
+            self._fake._clientes[cid] = dict(self._insert_data)
+            return MagicMock(data=[{"id": cid}])
+
+        if self._method == "update" and self._update_id:
+            if self._update_id in self._fake._clientes:
+                self._fake._clientes[self._update_id].update(self._update_data)
+            return MagicMock(data=[{"id": self._update_id}])
+
+        return MagicMock(data=[])
+
+
+# ── Configurar el mock ───────────────────────────────────────
+_fake_supabase = _FakeSupabase()
 
 _module_path = str(Path(__file__).parent.parent)
 if _module_path not in sys.path:
@@ -25,7 +155,7 @@ if _module_path not in sys.path:
 
 with patch.dict("sys.modules", {
     "backend.supabase_client": MagicMock(
-        supabase=mock_supabase,
+        supabase=_fake_supabase,
         is_connected=lambda: True,
     )
 }):
@@ -39,41 +169,52 @@ with patch.dict("sys.modules", {
 #  Helpers
 # ═══════════════════════════════════════════════════════════════
 
-def _reset_cliente():
-    """Limpia _cliente_actual entre tests."""
+def _reset():
+    """Limpia estado entre tests."""
     _cliente_actual.clear()
+    _fake_supabase._clientes.clear()
+    _fake_supabase._llamadas.clear()
+    _fake_supabase._next_id = 1
+    _fake_supabase._next_llamada_id = 1
 
 
-def _registrar_cliente():
-    """Helper: registra un cliente de prueba y devuelve el response."""
-    return ejecutar_tool("registrar_datos_cliente", {
+def _registrar_cliente(**kwargs):
+    """Helper: registra un cliente y devuelve el response."""
+    data = {
         "nombre": "Juan Pérez",
         "cedula": "1234567890",
         "empresa": "Empresa SA",
         "telefono": "3001234567",
-    })
+    }
+    data.update(kwargs)
+    return ejecutar_tool("registrar_datos_cliente", data)
 
 
 # ═══════════════════════════════════════════════════════════════
-#  registrar_datos_cliente
+#  registrar_datos_cliente — upsert por cédula
 # ═══════════════════════════════════════════════════════════════
 
 class TestRegistrarDatosCliente:
     def setup_method(self):
-        _reset_cliente()
+        _reset()
 
-    def test_registra_datos_basicos(self):
+    def test_registra_cliente_nuevo(self):
         resp = _registrar_cliente()
         assert resp["registrado"] is True
+        assert resp["ya_registrado"] is False  # ← nuevo!
         assert resp["nombre"] == "Juan Pérez"
         assert resp["cedula"] == "1234567890"
         assert resp["empresa"] == "Empresa SA"
         assert resp["telefono"] == "3001234567"
 
+    def test_cliente_nuevo_recibe_mensaje_creacion(self):
+        resp = _registrar_cliente()
+        assert "registrados correctamente" in resp["mensaje"]
+
     def test_retorna_cliente_id(self):
         resp = _registrar_cliente()
         assert "cliente_id" in resp
-        assert resp["cliente_id"] == 42
+        assert resp["cliente_id"] == 1  # primer ID
 
     def test_guarda_en_memoria(self):
         _registrar_cliente()
@@ -81,10 +222,10 @@ class TestRegistrarDatosCliente:
         assert _cliente_actual["cedula"] == "1234567890"
         assert _cliente_actual["empresa"] == "Empresa SA"
         assert _cliente_actual["telefono"] == "3001234567"
-        assert _cliente_actual["cliente_id"] == 42
+        assert _cliente_actual["cliente_id"] == 1
 
     def test_funciona_solo_con_requeridos(self):
-        _reset_cliente()
+        _reset()
         resp = ejecutar_tool("registrar_datos_cliente", {
             "nombre": "Ana",
             "cedula": "9876543210",
@@ -92,9 +233,50 @@ class TestRegistrarDatosCliente:
         assert resp["registrado"] is True
         assert resp["nombre"] == "Ana"
         assert resp["cedula"] == "9876543210"
-        # Sin empresa/telefono no debe fallar
         assert resp.get("empresa") == ""
         assert resp.get("telefono") == ""
+
+
+# ═══════════════════════════════════════════════════════════════
+#  registrar_datos_cliente — cliente existente (misma cédula)
+# ═══════════════════════════════════════════════════════════════
+
+class TestClienteYaRegistrado:
+    def setup_method(self):
+        _reset()
+        # Registrar primera vez
+        _registrar_cliente()
+
+    def test_misma_cedula_detecta_existente(self):
+        """Segundo registro con misma cédula → ya_registrado=True."""
+        resp = _registrar_cliente()
+        assert resp["ya_registrado"] is True
+
+    def test_misma_cedula_devuelve_mismo_id(self):
+        resp = _registrar_cliente()
+        assert resp["cliente_id"] == 1  # mismo ID
+
+    def test_misma_cedula_recibe_mensaje_actualizacion(self):
+        resp = _registrar_cliente()
+        assert "ya registrado" in resp["mensaje"].lower()
+        assert "actualizados" in resp["mensaje"].lower()
+
+    def test_misma_cedula_actualiza_datos(self):
+        """Si cambia teléfono, se actualiza."""
+        resp = _registrar_cliente(telefono="9998887777")
+        assert resp["telefono"] == "9998887777"
+        assert resp["ya_registrado"] is True
+
+    def test_cedula_diferente_es_nuevo_cliente(self):
+        """Cédula distinta → nuevo cliente, ID secuencial."""
+        resp = _registrar_cliente(
+            nombre="Maria Gomez",
+            cedula="5555555555",
+            empresa="Otra SA",
+            telefono="3000000000",
+        )
+        assert resp["ya_registrado"] is False
+        assert resp["cliente_id"] == 2  # ID nuevo
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -103,7 +285,7 @@ class TestRegistrarDatosCliente:
 
 class TestRegistrarResumenLlamada:
     def setup_method(self):
-        _reset_cliente()
+        _reset()
         _registrar_cliente()
 
     def test_registra_resumen_valido(self):
@@ -160,13 +342,25 @@ class TestRegistrarResumenLlamada:
         })
         assert resp["registrado"] is True
 
-    def test_sin_servicios_no_opcionales_no_falla(self):
+    def test_sin_servicios_opcionales_no_falla(self):
         resp = ejecutar_tool("registrar_resumen_llamada", {
             "resumen": "Consulta general.",
             "intention": "fria",
             "score_lead": 5,
         })
         assert resp["registrado"] is True
+
+    def test_resumen_de_llamada_vinculado_al_cliente(self):
+        """El resumen se registra con el cliente_id de _cliente_actual."""
+        _reset()
+        _registrar_cliente(cedula="1111111111", nombre="Cliente A")
+        resp = ejecutar_tool("registrar_resumen_llamada", {
+            "resumen": "Consulta sobre cloud.",
+            "intention": "calida",
+            "score_lead": 60,
+        })
+        assert resp["registrado"] is True
+        assert "llamada_id" in resp
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -175,7 +369,7 @@ class TestRegistrarResumenLlamada:
 
 class TestResumenSinCliente:
     def setup_method(self):
-        _reset_cliente()
+        _reset()
 
     def test_rechaza_sin_cliente(self):
         resp = ejecutar_tool("registrar_resumen_llamada", {
@@ -193,7 +387,7 @@ class TestResumenSinCliente:
 
 class TestFallbackDefaults:
     def setup_method(self):
-        _reset_cliente()
+        _reset()
         _registrar_cliente()
 
     def test_fallback_defaults_son_validos(self):

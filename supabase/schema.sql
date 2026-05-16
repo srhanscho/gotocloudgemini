@@ -66,7 +66,7 @@ COMMENT ON TABLE public.productos_saas IS 'Productos SaaS propios de GoToCloud';
 CREATE TABLE IF NOT EXISTS public.clientes (
     id          SERIAL PRIMARY KEY,
     nombre      TEXT NOT NULL,
-    cedula      TEXT NOT NULL,
+    cedula      TEXT NOT NULL UNIQUE,
     empresa     TEXT,
     telefono    TEXT,
     updated_at  TIMESTAMPTZ DEFAULT now(),

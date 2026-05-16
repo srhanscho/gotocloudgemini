@@ -266,7 +266,11 @@ GOTOCLOUD_TOOLS: list[dict[str, Any]] = [
             "Registra los datos del cliente al inicio de la llamada: nombre completo, cédula, "
             "empresa donde trabaja y teléfono de contacto. "
             "SIEMPRE llama esta tool al comienzo de la conversación, antes de responder "
-            "cualquier otra pregunta. Recoge todos los campos antes de llamarla."
+            "cualquier otra pregunta. Recoge todos los campos antes de llamarla.\n\n"
+            "COMPORTAMIENTO: La cédula es única. Si el cliente YA EXISTE (llamada recurrente), "
+            "la tool actualiza sus datos y retorna ya_registrado=true con el ID existente. "
+            "Si es NUEVO, lo crea y retorna ya_registrado=false. "
+            "En ambos casos retorna el cliente_id para usar en otras tools."
         ),
         "parameters": {
             "type": "object",
@@ -453,33 +457,67 @@ def ejecutar_tool(nombre: str, args: dict[str, Any] | None = None) -> dict[str, 
         _cliente_actual["started_at"] = datetime.now(timezone.utc).isoformat()
 
         cliente_id = None
+        ya_registrado = False
         if supabase is not None:
             try:
-                row = {"nombre": nombre_cliente, "cedula": cedula}
-                if empresa_cliente:
-                    row["empresa"] = empresa_cliente
-                if telefono_cliente:
-                    row["telefono"] = telefono_cliente
-                resultado = supabase.table("clientes").insert(row).execute()
-                if resultado.data and len(resultado.data) > 0:
-                    cliente_id = resultado.data[0]["id"]
+                # 1. Buscar por cédula (es UNIQUE)
+                existente = supabase.table("clientes") \
+                    .select("id") \
+                    .eq("cedula", cedula) \
+                    .execute()
+                if existente.data and len(existente.data) > 0:
+                    # Ya existe → UPDATE
+                    cliente_id = existente.data[0]["id"]
+                    update_row = {}
+                    if nombre_cliente:
+                        update_row["nombre"] = nombre_cliente
+                    if empresa_cliente:
+                        update_row["empresa"] = empresa_cliente
+                    if telefono_cliente:
+                        update_row["telefono"] = telefono_cliente
+                    update_row["updated_at"] = datetime.now(timezone.utc).isoformat()
+                    supabase.table("clientes") \
+                        .update(update_row) \
+                        .eq("id", cliente_id) \
+                        .execute()
+                    ya_registrado = True
                     _cliente_actual["cliente_id"] = cliente_id
-                    print(f"[Supabase] Cliente insertado: id={cliente_id}, row={row}")
+                    print(f"[Supabase] Cliente ACTUALIZADO: id={cliente_id}, cedula={cedula}")
                 else:
-                    print(f"[Supabase] Cliente insertado sin返回 ID")
+                    # No existe → INSERT
+                    row = {"nombre": nombre_cliente, "cedula": cedula}
+                    if empresa_cliente:
+                        row["empresa"] = empresa_cliente
+                    if telefono_cliente:
+                        row["telefono"] = telefono_cliente
+                    resultado = supabase.table("clientes").insert(row).execute()
+                    if resultado.data and len(resultado.data) > 0:
+                        cliente_id = resultado.data[0]["id"]
+                        _cliente_actual["cliente_id"] = cliente_id
+                        print(f"[Supabase] Cliente NUEVO: id={cliente_id}, cedula={cedula}")
+                    else:
+                        print(f"[Supabase] Cliente insertado sin ID")
             except Exception as ex:
-                print(f"[Supabase] Error al insertar cliente: {ex}")
+                print(f"[Supabase] Error al registrar cliente: {ex}")
         else:
             print(f"[BD] Cliente registrado (sin Supabase): nombre={nombre_cliente!r}, cedula={cedula!r}")
 
         response = {
             "registrado": True,
+            "ya_registrado": ya_registrado,
             "nombre": nombre_cliente,
             "cedula": cedula,
             "empresa": empresa_cliente,
             "telefono": telefono_cliente,
-            "mensaje": f"Datos registrados correctamente para {nombre_cliente}.",
         }
+        if ya_registrado:
+            response["mensaje"] = (
+                f"Cliente ya registrado. Datos actualizados para {nombre_cliente}."
+            )
+        else:
+            response["mensaje"] = (
+                f"Datos registrados correctamente para {nombre_cliente}."
+            )
         if cliente_id is not None:
             response["cliente_id"] = cliente_id
         return response
@@ -678,7 +716,8 @@ Lo primero que debes hacer SIEMPRE, antes de cualquier otra cosa, es:
 5. Pedir el nombre de la empresa u organización donde trabaja.
 6. Pedir un número de teléfono de contacto.
 7. Llamar la tool `registrar_datos_cliente` con todos esos datos.
-8. Luego preguntar en qué puedes ayudar.
+8. Revisar la respuesta: si `ya_registrado` es `true`, saluda al cliente como ya conocido ("Qué bueno tenerte de vuelta, [nombre]") y confirma si sus datos siguen igual.
+9. Luego preguntar en qué puedes ayudar.
 
 ## CÓMO USAR LAS TOOLS
 - Usa SIEMPRE las tools para dar información. No inventes datos.
