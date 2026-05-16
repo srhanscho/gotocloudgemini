@@ -87,8 +87,39 @@ async def run():
     print(f"Tools: {len(GOTOCLOUD_TOOLS)} cargados")
     print("Conectando como Camila (GoToCloud)...")
 
+    # Timer para fallback de timeout (60 segundos)
+    timeout_task: asyncio.Task | None = None
+    resumen_called = asyncio.Event()
+
+    async def timeout_fallback():
+        """Fallback: ejecutar registrar_resumen_llamada si no se ejecutó en 60s."""
+        if not resumen_called.is_set():
+            print("\n[timeout fallback] 60s sin respuesta — invocando registrar_resumen_llamada")
+            try:
+                result = ejecutar_tool("registrar_resumen_llamada", {
+                    "resumen": "Llamada finalizada por tiempo de espera.",
+                    "intention": "calida",
+                    "score_lead": 50,
+                    "servicios_interes": [],
+                    "recomendaciones": "Cliente no completó la conversación.",
+                })
+                print(f"[timeout fallback] Resultado: {result}")
+            except Exception as ex:
+                print(f"[timeout fallback] Error: {ex}")
+
+    def reset_timeout_timer():
+        """Reinicia el timer de 60 segundos."""
+        nonlocal timeout_task
+        if timeout_task and not timeout_task.done():
+            timeout_task.cancel()
+        timeout_task = asyncio.create_task(timeout_fallback())
+        # No reiniciamos resumen_called aquí — solo se marca cuando se ejecuta la tool
+
     async with client.aio.live.connect(model=MODEL, config=config) as session:
         print("Conectada. Habla con el micrófono. Ctrl+C para salir.\n")
+
+        # Iniciar timer al principio
+        reset_timeout_timer()
 
         async def capture_and_send():
             try:
@@ -121,6 +152,9 @@ async def run():
                             for fc in response.tool_call.function_calls:
                                 print(f"\n[tool] {fc.name}({dict(fc.args or {})})")
                                 result = ejecutar_tool(fc.name, dict(fc.args or {}))
+                                # Marcar si se ejecutó registrar_resumen_llamada
+                                if fc.name == "registrar_resumen_llamada":
+                                    resumen_called.set()
                                 fn_responses.append(
                                     types.FunctionResponse(
                                         id=fc.id,
@@ -157,6 +191,8 @@ async def run():
 
                         if sc.input_transcription and sc.input_transcription.text:
                             print(f"\nTú:    {sc.input_transcription.text}", end="", flush=True)
+                            # Resetear timer cuando hay nuevo input del usuario
+                            reset_timeout_timer()
 
                         if sc.output_transcription and sc.output_transcription.text:
                             if not gemini_speaking:
@@ -170,6 +206,8 @@ async def run():
                                 gemini_speaking = False
                             interrupted.clear()
                             print()
+                            # Reiniciar timer después de turn_complete
+                            reset_timeout_timer()
 
             except asyncio.CancelledError:
                 pass
@@ -195,6 +233,13 @@ async def run():
         except asyncio.CancelledError:
             pass
         finally:
+            # Cancelar el timer de fallback
+            if timeout_task and not timeout_task.done():
+                timeout_task.cancel()
+                try:
+                    await timeout_task
+                except asyncio.CancelledError:
+                    pass
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)

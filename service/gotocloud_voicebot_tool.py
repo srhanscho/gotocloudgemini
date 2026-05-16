@@ -6,6 +6,7 @@
 from __future__ import annotations
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -367,7 +368,7 @@ GOTOCLOUD_TOOLS: list[dict[str, Any]] = [
         "name": "obtener_beneficios_para_cliente",
         "description": (
             "Recomienda servicios de GoToCloud según el tipo de empresa y la necesidad "
-            "detectada. Úsala cuando el cliente cuente su situación o problema y necesites "
+            "detectada. Úsala cuando el cliente cuento su situación o problema y necesites "
             "recomendar la solución más adecuada."
         ),
         "parameters": {
@@ -383,6 +384,41 @@ GOTOCLOUD_TOOLS: list[dict[str, Any]] = [
                 },
             },
             "required": [],
+        },
+    },
+    {
+        "name": "registrar_resumen_llamada",
+        "description": (
+            "Guarda el resumen y metadata al final de la llamada. LLAMA CUANDO LA LLAMADA ESTÉ POR TERMINAR. "
+            "Incluye toda la información obtenida durante la conversación."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "resumen": {
+                    "type": "string",
+                    "description": "Resumen breve de la conversación, qué preguntó, qué le interessó.",
+                },
+                "intention": {
+                    "type": "string",
+                    "enum": ["fria", "calida", "caliente"],
+                    "description": "'fria': solo consultas generales, 'calida': interés real pero sin urgencia, 'caliente': necesidad inmediata o presupuesto disponible",
+                },
+                "score_lead": {
+                    "type": "integer",
+                    "description": "Probabilidad de cierre 0-100. 0-30 baja, 31-60 media, 61-100 alta.",
+                },
+                "servicios_interes": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "IDs de servicios que le interesaron al cliente (cloud_computing, seguridad, etc.)",
+                },
+                "recomendaciones": {
+                    "type": "string",
+                    "description": "Recomendaciones para el vendedor que hará seguimiento",
+                },
+            },
+            "required": ["resumen", "intention", "score_lead"],
         },
     },
 ]
@@ -413,6 +449,10 @@ def ejecutar_tool(nombre: str, args: dict[str, Any] | None = None) -> dict[str, 
         _cliente_actual["cedula"] = cedula
         _cliente_actual["empresa"] = empresa_cliente
         _cliente_actual["telefono"] = telefono_cliente
+        # Guardar timestamp de inicio de llamada
+        _cliente_actual["started_at"] = datetime.now(timezone.utc).isoformat()
+
+        cliente_id = None
         if supabase is not None:
             try:
                 row = {"nombre": nombre_cliente, "cedula": cedula}
@@ -420,13 +460,19 @@ def ejecutar_tool(nombre: str, args: dict[str, Any] | None = None) -> dict[str, 
                     row["empresa"] = empresa_cliente
                 if telefono_cliente:
                     row["telefono"] = telefono_cliente
-                supabase.table("clientes").insert(row).execute()
-                print(f"[Supabase] Cliente insertado: {row}")
+                resultado = supabase.table("clientes").insert(row).execute()
+                if resultado.data and len(resultado.data) > 0:
+                    cliente_id = resultado.data[0]["id"]
+                    _cliente_actual["cliente_id"] = cliente_id
+                    print(f"[Supabase] Cliente insertado: id={cliente_id}, row={row}")
+                else:
+                    print(f"[Supabase] Cliente insertado sin返回 ID")
             except Exception as ex:
                 print(f"[Supabase] Error al insertar cliente: {ex}")
         else:
             print(f"[BD] Cliente registrado (sin Supabase): nombre={nombre_cliente!r}, cedula={cedula!r}")
-        return {
+
+        response = {
             "registrado": True,
             "nombre": nombre_cliente,
             "cedula": cedula,
@@ -434,6 +480,9 @@ def ejecutar_tool(nombre: str, args: dict[str, Any] | None = None) -> dict[str, 
             "telefono": telefono_cliente,
             "mensaje": f"Datos registrados correctamente para {nombre_cliente}.",
         }
+        if cliente_id is not None:
+            response["cliente_id"] = cliente_id
+        return response
 
     elif nombre == "obtener_informacion_empresa":
         e = GOTOCLOUD_KB["empresa"]
@@ -547,6 +596,66 @@ def ejecutar_tool(nombre: str, args: dict[str, Any] | None = None) -> dict[str, 
             }]
         return {"tipo_empresa": tipo, "necesidad": necesidad or "general", "recomendaciones": recomendaciones}
 
+    elif nombre == "registrar_resumen_llamada":
+        resumen = args.get("resumen", "").strip()
+        intention = args.get("intention", "calida")
+        score_lead = args.get("score_lead", 50)
+        servicios_interes = args.get("servicios_interes", [])
+        recomendaciones = args.get("recomendaciones", "").strip()
+
+        # Validar score_lead
+        if score_lead < 0 or score_lead > 100:
+            return {"error": "score_lead debe estar entre 0 y 100"}
+
+        # Validar intention
+        if intention not in ("fria", "calida", "caliente"):
+            return {"error": "intention debe ser 'fria', 'calida' o 'caliente'"}
+
+        # Obtener cliente_id
+        cliente_id = _cliente_actual.get("cliente_id")
+        cedula = _cliente_actual.get("cedula")
+
+        if not cliente_id and cedula and supabase is not None:
+            # Buscar por cédula
+            try:
+                result = supabase.table("clientes").select("id").eq("cedula", cedula).execute()
+                if result.data and len(result.data) > 0:
+                    cliente_id = result.data[0]["id"]
+            except Exception as ex:
+                print(f"[Supabase] Error al buscar cliente por cédula: {ex}")
+
+        if not cliente_id:
+            return {"error": "No hay cliente registrado. Llama primero a registrar_datos_cliente."}
+
+        # Insertar en tabla llamadas
+        started_at = _cliente_actual.get("started_at")
+        row = {
+            "cliente_id": cliente_id,
+            "resumen": resumen,
+            "intention": intention,
+            "score_lead": score_lead,
+            "servicios_interes": servicios_interes or [],
+            "recomendaciones": recomendaciones,
+            "started_at": started_at,
+        }
+
+        if supabase is not None:
+            try:
+                resultado = supabase.table("llamadas").insert(row).execute()
+                if resultado.data and len(resultado.data) > 0:
+                    llamada_id = resultado.data[0]["id"]
+                    print(f"[Supabase] Llamada registrada: id={llamada_id}")
+                    return {"registrado": True, "llamada_id": llamada_id}
+                else:
+                    print(f"[Supabase] Llamada registrada sin返回 ID")
+                    return {"registrado": True}
+            except Exception as ex:
+                print(f"[Supabase] Error al registrar llamada: {ex}")
+                return {"error": f"Error al registrar llamada: {ex}"}
+        else:
+            print(f"[BD] Llamada registrada (sin Supabase): cliente_id={cliente_id}, resumen={resumen!r}")
+            return {"registrado": True}
+
     else:
         return {"error": f"Tool '{nombre}' no reconocida."}
 
@@ -594,6 +703,17 @@ Lo primero que debes hacer SIEMPRE, antes de cualquier otra cosa, es:
 3. Identificar tipo de empresa (pyme, corporativo, gobierno)
 4. Usar tool adecuada para dar información precisa
 5. Ofrecer hablar con asesor si hay interés
+
+## CIERRE DE LLAMADA
+Al final de la conversación, cuando el cliente indique que se va, agradezca o no tenga más preguntas:
+1. Pregunta si hay algo más en lo que puedas ayudar
+2. Si el cliente confirma que no, llama la tool `registrar_resumen_llamada` con:
+   - Resumen: qué preguntó, qué le interesó, en qué estado quedó
+   - Intención: 'fria' (solo consultas), 'calida' (interés real sin urgencia), 'caliente' (necesidad inmediata)
+   - Score: 0-100 según probabilidad de compra
+   - Servicios de interés: solo los que mencionó explícitamente
+   - Recomendaciones: qué debería hacer el vendedor en el seguimiento
+3. Después de recibir la confirmación de la tool, despidete cordialmente
 """.strip()
 
 

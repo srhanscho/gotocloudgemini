@@ -67,10 +67,30 @@ CREATE TABLE IF NOT EXISTS public.clientes (
     id          SERIAL PRIMARY KEY,
     nombre      TEXT NOT NULL,
     cedula      TEXT NOT NULL,
+    empresa     TEXT,
+    telefono    TEXT,
+    updated_at  TIMESTAMPTZ DEFAULT now(),
     created_at  TIMESTAMPTZ DEFAULT now()
 );
 
 COMMENT ON TABLE public.clientes IS 'Registro de llamadas / clientes contactados';
+
+-- 6. Llamadas (metadata de cada llamada)
+CREATE TABLE IF NOT EXISTS public.llamadas (
+    id                  SERIAL PRIMARY KEY,
+    cliente_id          INTEGER NOT NULL REFERENCES clientes(id) ON DELETE CASCADE,
+    started_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    ended_at            TIMESTAMPTZ,
+    duracion_segundos   INTEGER,
+    resumen             TEXT,
+    intention           VARCHAR(10) CHECK (intention IN ('fria', 'calida', 'caliente')),
+    score_lead          INTEGER CHECK (score_lead BETWEEN 0 AND 100),
+    servicios_interes   TEXT[] DEFAULT '{}',
+    recomendaciones     TEXT,
+    created_at          TIMESTAMPTZ DEFAULT now()
+);
+
+COMMENT ON TABLE public.llamadas IS 'Metadata de llamadas: resumen, intención, score, servicios de interés';
 
 -- =============================================================
 --  Permisos: habilitar acceso anónimo (lectura/escritura)
@@ -81,6 +101,7 @@ ALTER TABLE public.servicios       ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.metricas        ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.productos_saas  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.clientes        ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.llamadas         ENABLE ROW LEVEL SECURITY;
 
 -- Limpiar políticas existentes (para rerun seguro)
 DROP POLICY IF EXISTS "anon_select_empresa"         ON public.empresa;
@@ -89,6 +110,8 @@ DROP POLICY IF EXISTS "anon_select_metricas"        ON public.metricas;
 DROP POLICY IF EXISTS "anon_select_productos_saas"  ON public.productos_saas;
 DROP POLICY IF EXISTS "anon_insert_clientes"        ON public.clientes;
 DROP POLICY IF EXISTS "anon_select_clientes"        ON public.clientes;
+DROP POLICY IF EXISTS "anon_insert_llamadas"        ON public.llamadas;
+DROP POLICY IF EXISTS "anon_select_llamadas"        ON public.llamadas;
 DROP POLICY IF EXISTS "anon_insert_empresa"         ON public.empresa;
 DROP POLICY IF EXISTS "anon_upsert_empresa"         ON public.empresa;
 DROP POLICY IF EXISTS "anon_insert_servicios"       ON public.servicios;
@@ -110,6 +133,13 @@ CREATE POLICY "anon_insert_clientes" ON public.clientes
 
 -- Permitir select anónimo en clientes (verificar si ya existe)
 CREATE POLICY "anon_select_clientes" ON public.clientes
+    FOR SELECT USING (true);
+
+-- Políticas RLS para tabla llamadas
+CREATE POLICY "anon_insert_llamadas" ON public.llamadas
+    FOR INSERT WITH CHECK (true);
+
+CREATE POLICY "anon_select_llamadas" ON public.llamadas
     FOR SELECT USING (true);
 
 -- Permitir insert/upsert anónimo para seed de datos

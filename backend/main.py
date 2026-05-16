@@ -92,6 +92,38 @@ async def twilio_stream(websocket: WebSocket):
     stream_sid: str | None = None
     stop_event = asyncio.Event()
 
+    # Timer para fallback de timeout (60 segundos)
+    timeout_task: asyncio.Task | None = None
+
+    async def timeout_fallback():
+        """Fallback: ejecutar registrar_resumen_llamada si no se ejecutó en 60s."""
+        # No ejecutar si la llamada ya terminó (stop_event está seteado)
+        if stop_event.is_set():
+            return
+        if ejecutar_tool:
+            logger.warning("[timeout fallback] 60s sin actividad — invocando registrar_resumen_llamada")
+            try:
+                result = ejecutar_tool("registrar_resumen_llamada", {
+                    "resumen": "Llamada finalizada por tiempo de espera.",
+                    "intention": "calida",
+                    "score_lead": 50,
+                    "servicios_interes": [],
+                    "recomendaciones": "Cliente no completó la conversación.",
+                })
+                logger.info(f"[timeout fallback] Resultado: {result}")
+            except Exception as ex:
+                logger.error(f"[timeout fallback] Error: {ex}")
+
+    def reset_timeout_timer():
+        """Reinicia el timer de 60 segundos."""
+        nonlocal timeout_task
+        if timeout_task and not timeout_task.done():
+            timeout_task.cancel()
+        timeout_task = asyncio.create_task(timeout_fallback())
+
+    # Iniciar timer al principio
+    reset_timeout_timer()
+
     async def receive_from_twilio():
         nonlocal stream_sid
         try:
@@ -114,12 +146,17 @@ async def twilio_stream(websocket: WebSocket):
                         logger.debug(f"Twilio media received bytes={len(pcm)}")
                         await gemini.send_audio_pcm16_16k(pcm)
                         logger.debug(f"sent to Gemini bytes={len(pcm)}")
+                        # Resetear timer de fallback al recibir audio
+                        reset_timeout_timer()
                     except Exception as exc:
                         logger.warning(f"Audio conversion error (Twilio→Gemini): {exc}")
 
                 elif event == "stop":
                     logger.info("Twilio stop")
                     stop_event.set()
+                    # Cancelar el timer de fallback al terminar la llamada
+                    if timeout_task and not timeout_task.done():
+                        timeout_task.cancel()
                     break
 
         except WebSocketDisconnect:
@@ -163,6 +200,13 @@ async def twilio_stream(websocket: WebSocket):
     try:
         await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     finally:
+        # Limpiar timer de fallback
+        if timeout_task and not timeout_task.done():
+            timeout_task.cancel()
+            try:
+                await timeout_task
+            except asyncio.CancelledError:
+                pass
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
