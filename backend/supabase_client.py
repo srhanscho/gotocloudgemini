@@ -33,7 +33,7 @@ def is_connected() -> bool:
     if supabase is None:
         return False
     try:
-        supabase.table("empresa").select("id").limit(1).execute()
+        supabase.table("clientes").select("id").limit(1).execute()
         return True
     except Exception:
         return False

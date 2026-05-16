@@ -258,9 +258,10 @@ GOTOCLOUD_TOOLS: list[dict[str, Any]] = [
     {
         "name": "registrar_datos_cliente",
         "description": (
-            "Registra el nombre y número de cédula del cliente al inicio de la llamada. "
+            "Registra los datos del cliente al inicio de la llamada: nombre completo, cédula, "
+            "empresa donde trabaja y teléfono de contacto. "
             "SIEMPRE llama esta tool al comienzo de la conversación, antes de responder "
-            "cualquier otra pregunta. Necesitas preguntar el nombre completo y la cédula."
+            "cualquier otra pregunta. Recoge todos los campos antes de llamarla."
         ),
         "parameters": {
             "type": "object",
@@ -272,6 +273,14 @@ GOTOCLOUD_TOOLS: list[dict[str, Any]] = [
                 "cedula": {
                     "type": "string",
                     "description": "Número de cédula o documento de identidad del cliente.",
+                },
+                "empresa": {
+                    "type": "string",
+                    "description": "Nombre de la empresa u organización donde trabaja el cliente.",
+                },
+                "telefono": {
+                    "type": "string",
+                    "description": "Número de teléfono o celular de contacto del cliente.",
                 },
             },
             "required": ["nombre", "cedula"],
@@ -394,189 +403,145 @@ def ejecutar_tool(nombre: str, args: dict[str, Any] | None = None) -> dict[str, 
     if nombre == "registrar_datos_cliente":
         nombre_cliente = args.get("nombre", "").strip()
         cedula = args.get("cedula", "").strip()
+        empresa_cliente = args.get("empresa", "").strip()
+        telefono_cliente = args.get("telefono", "").strip()
         _cliente_actual["nombre"] = nombre_cliente
         _cliente_actual["cedula"] = cedula
-        print(f"\n[BD] Cliente registrado: nombre={nombre_cliente!r}, cedula={cedula!r}")
+        _cliente_actual["empresa"] = empresa_cliente
+        _cliente_actual["telefono"] = telefono_cliente
+        if supabase is not None:
+            try:
+                row = {"nombre": nombre_cliente, "cedula": cedula}
+                if empresa_cliente:
+                    row["empresa"] = empresa_cliente
+                if telefono_cliente:
+                    row["telefono"] = telefono_cliente
+                supabase.table("clientes").insert(row).execute()
+                print(f"[Supabase] Cliente insertado: {row}")
+            except Exception as ex:
+                print(f"[Supabase] Error al insertar cliente: {ex}")
+        else:
+            print(f"[BD] Cliente registrado (sin Supabase): nombre={nombre_cliente!r}, cedula={cedula!r}")
         return {
             "registrado": True,
             "nombre": nombre_cliente,
             "cedula": cedula,
+            "empresa": empresa_cliente,
+            "telefono": telefono_cliente,
             "mensaje": f"Datos registrados correctamente para {nombre_cliente}.",
         }
 
     elif nombre == "obtener_informacion_empresa":
-        try:
-            if supabase is None:
-                raise Exception("Cliente Supabase no inicializado")
-            result = supabase.table("empresa").select("*").eq("id", 1).execute()
-            if not result.data:
-                return _fallback("información de la empresa")
-            e = result.data[0]
-            return {
-                "nombre": e.get("nombre"),
-                "descripcion": e.get("descripcion"),
-                "presencia": e.get("presencia"),
-                "propuesta_valor": e.get("propuesta_valor"),
-                "clientes_destacados": e.get("clientes_destacados"),
-                "partners": e.get("partners"),
-                "reconocimientos": e.get("reconocimientos"),
-            }
-        except Exception as ex:
-            print(f"[KB DB error] obtener_informacion_empresa: {ex}")
-            return _fallback("información de la empresa")
+        e = GOTOCLOUD_KB["empresa"]
+        return {
+            "nombre": e["nombre"],
+            "descripcion": e["descripcion"],
+            "presencia": e["presencia"],
+            "propuesta_valor": e["propuesta_valor"],
+            "clientes_destacados": e["clientes_destacados"],
+            "partners": e["partners"],
+            "reconocimientos": e["reconocimientos"],
+        }
 
     elif nombre == "obtener_servicios":
-        try:
-            if supabase is None:
-                raise Exception("Cliente Supabase no inicializado")
-            result = supabase.table("servicios").select("*").execute()
-            if not result.data:
-                return _fallback("servicios")
-            servicios_dict = {row["id"]: row for row in result.data}
-            servicio = args.get("servicio", "todos")
-            if servicio == "todos":
-                return {
-                    "servicios": [
-                        {"id": k, "nombre": v.get("nombre"), "descripcion": v.get("descripcion")}
-                        for k, v in servicios_dict.items()
-                    ]
-                }
-            if servicio in servicios_dict:
-                return servicios_dict[servicio]
-            return {"error": f"Servicio '{servicio}' no encontrado."}
-        except Exception as ex:
-            print(f"[KB DB error] obtener_servicios: {ex}")
-            return _fallback("servicios")
+        servicios = GOTOCLOUD_KB["servicios"]
+        servicio = args.get("servicio", "todos")
+        if servicio == "todos":
+            return {
+                "servicios": [
+                    {"id": k, "nombre": v.get("nombre"), "descripcion": v.get("descripcion")}
+                    for k, v in servicios.items()
+                ]
+            }
+        if servicio in servicios:
+            return servicios[servicio]
+        return {"error": f"Servicio '{servicio}' no encontrado."}
 
     elif nombre == "obtener_producto_saas":
-        try:
-            if supabase is None:
-                raise Exception("Cliente Supabase no inicializado")
-            result = supabase.table("productos_saas").select("*").execute()
-            if not result.data:
-                return _fallback("productos SaaS")
-            productos_dict = {row["id"]: row for row in result.data}
-            producto = args.get("producto", "todos")
-            if producto == "todos":
-                return {"productos": productos_dict}
-            if producto in productos_dict:
-                return productos_dict[producto]
-            return {"error": f"Producto '{producto}' no encontrado."}
-        except Exception as ex:
-            print(f"[KB DB error] obtener_producto_saas: {ex}")
-            return _fallback("productos SaaS")
+        productos = GOTOCLOUD_KB["servicios"]["soluciones_saas"]["productos"]
+        producto = args.get("producto", "todos")
+        if producto == "todos":
+            return {"productos": productos}
+        if producto in productos:
+            return productos[producto]
+        return {"error": f"Producto '{producto}' no encontrado."}
 
     elif nombre == "obtener_metricas":
-        try:
-            if supabase is None:
-                raise Exception("Cliente Supabase no inicializado")
-            result = supabase.table("metricas").select("*").execute()
-            if not result.data:
-                return _fallback("métricas")
-            return {row["clave"]: row["valor"] for row in result.data}
-        except Exception as ex:
-            print(f"[KB DB error] obtener_metricas: {ex}")
-            return _fallback("métricas")
+        return GOTOCLOUD_KB["metricas"]
 
     elif nombre == "obtener_contacto":
-        try:
-            if supabase is None:
-                raise Exception("Cliente Supabase no inicializado")
-            result = supabase.table("empresa").select("contacto").eq("id", 1).execute()
-            if not result.data or not result.data[0].get("contacto"):
-                return _fallback("contacto")
-            contacto = result.data[0]["contacto"].copy()
-            contacto["mensaje"] = (
-                "Un asesor de GoToCloud puede orientarte y preparar una propuesta personalizada. "
-                "¿Te gustaría que te contactaran por WhatsApp al +57 317 427 0148?"
-            )
-            return contacto
-        except Exception as ex:
-            print(f"[KB DB error] obtener_contacto: {ex}")
-            return _fallback("contacto")
+        contacto = GOTOCLOUD_KB["empresa"]["contacto"].copy()
+        contacto["mensaje"] = (
+            "Un asesor de GoToCloud puede orientarte y preparar una propuesta personalizada. "
+            "Te pueden contactar por WhatsApp al +57 317 427 0148."
+        )
+        return contacto
 
     elif nombre == "obtener_beneficios_para_cliente":
-        try:
-            if supabase is None:
-                raise Exception("Cliente Supabase no inicializado")
-            
-            # Fetch all servicios from DB
-            result = supabase.table("servicios").select("*").execute()
-            if not result.data:
-                return _fallback("recomendaciones")
-            
-            # Fetch productos_saas for recommendations that need them
-            productos_result = supabase.table("productos_saas").select("*").execute()
-            productos = {row["id"]: row for row in productos_result.data} if productos_result.data else {}
-            
-            # Build servicios dict
-            s = {row["id"]: row for row in result.data}
-            
-            tipo = args.get("tipo_empresa", "cualquiera")
-            necesidad = args.get("necesidad", "").lower()
-            recomendaciones: list[dict] = []
+        s = GOTOCLOUD_KB["servicios"]
+        productos = s["soluciones_saas"]["productos"]
+        tipo = args.get("tipo_empresa", "cualquiera")
+        necesidad = args.get("necesidad", "").lower()
+        recomendaciones: list[dict] = []
 
-            if any(k in necesidad for k in ["costo", "ahorro", "finops", "gasto"]):
-                recomendaciones.append({
-                    "servicio": "Servicios en la Nube con FinOps",
-                    "razon": "GoToCloud ofrece hasta un 40% de ahorro en costos operativos mediante FinOps.",
-                    "beneficios": s.get("cloud_computing", {}).get("beneficios", []),
-                })
-            if any(k in necesidad for k in ["document", "factura", "contrato", "papeleo", "manual"]):
-                recomendaciones.append({
-                    "servicio": "OASIS AI",
-                    "razon": "OASIS AI reduce en 40% el tiempo de gestión documental y en 25-30% los costos operativos.",
-                    "beneficios": productos.get("oasis", {}).get("beneficios", []),
-                })
-            if any(k in necesidad for k in ["reporte", "dashboard", "power bi", "analítica", "datos"]):
-                recomendaciones.append({
-                    "servicio": "Kármán Reporting Hub + Servicios de Datos",
-                    "razon": "Kármán permite distribuir reportes Power BI con ahorro en licencias.",
-                    "beneficios": productos.get("karman", {}).get("beneficios", []),
-                })
-            if any(k in necesidad for k in ["seguridad", "protección", "cumplimiento", "hack"]):
-                recomendaciones.append({
-                    "servicio": "Seguridad en la Nube",
-                    "razon": "GoToCloud tiene especialización avanzada en protección contra amenazas Microsoft.",
-                    "beneficios": s.get("seguridad", {}).get("especializaciones", []),
-                })
-            if any(k in necesidad for k in ["migración", "migracion", "nube", "azure", "mover"]):
-                beneficios_tipo = (
-                    s.get("cloud_computing", {}).get("para_quien", {}).get("pymes", [])
-                    if tipo == "pyme"
-                    else s.get("cloud_computing", {}).get("para_quien", {}).get("corporativos", [])
-                )
-                recomendaciones.append({
-                    "servicio": "Servicios en la Nube",
-                    "razon": "GoToCloud ha migrado más de 500 servidores a Azure con 0 horas de downtime.",
-                    "beneficios": beneficios_tipo,
-                })
-            if any(k in necesidad for k in ["ia", "inteligencia artificial", "automatiz"]):
-                recomendaciones.append({
-                    "servicio": "OASIS AI + Modernización de Aplicaciones con IA",
-                    "razon": "GoToCloud tiene especialización avanzada en IA y ML sobre Azure.",
-                    "beneficios": s.get("datos", {}).get("especializaciones", []),
-                })
-            if any(k in necesidad for k in ["soporte", "administr", "mantenimiento", "operar"]):
-                recomendaciones.append({
-                    "servicio": "Servicios Administrados de TI",
-                    "razon": "GoToCloud opera la infraestructura 24/7 para que el equipo se enfoque en el negocio.",
-                    "beneficios": s.get("servicios_administrados", {}).get("beneficios", []),
-                })
-            if not recomendaciones:
-                recomendaciones = [{
-                    "servicio": "Consultoría GoToCloud",
-                    "razon": "GoToCloud diseña soluciones personalizadas según tu industria y necesidades.",
-                    "beneficios": [
-                        "95% de satisfacción del cliente",
-                        "Más de 100 empresas transformadas en Latinoamérica",
-                        "Partner certificado Microsoft con múltiples especializaciones avanzadas",
-                    ],
-                }]
-            return {"tipo_empresa": tipo, "necesidad": necesidad or "general", "recomendaciones": recomendaciones}
-        except Exception as ex:
-            print(f"[KB DB error] obtener_beneficios_para_cliente: {ex}")
-            return _fallback("recomendaciones")
+        if any(k in necesidad for k in ["costo", "ahorro", "finops", "gasto"]):
+            recomendaciones.append({
+                "servicio": "Servicios en la Nube con FinOps",
+                "razon": "GoToCloud ofrece hasta un 40% de ahorro en costos operativos mediante FinOps.",
+                "beneficios": s["cloud_computing"].get("beneficios", []),
+            })
+        if any(k in necesidad for k in ["document", "factura", "contrato", "papeleo", "manual"]):
+            recomendaciones.append({
+                "servicio": "OASIS AI",
+                "razon": "OASIS AI reduce en 40% el tiempo de gestión documental y en 25-30% los costos operativos.",
+                "beneficios": productos["oasis"].get("beneficios", []),
+            })
+        if any(k in necesidad for k in ["reporte", "dashboard", "power bi", "analítica", "datos"]):
+            recomendaciones.append({
+                "servicio": "Kármán Reporting Hub + Servicios de Datos",
+                "razon": "Kármán permite distribuir reportes Power BI con ahorro en licencias.",
+                "beneficios": productos["karman"].get("beneficios", []),
+            })
+        if any(k in necesidad for k in ["seguridad", "protección", "cumplimiento", "hack"]):
+            recomendaciones.append({
+                "servicio": "Seguridad en la Nube",
+                "razon": "GoToCloud tiene especialización avanzada en protección contra amenazas Microsoft.",
+                "beneficios": s["seguridad"].get("especializaciones", []),
+            })
+        if any(k in necesidad for k in ["migración", "migracion", "nube", "azure", "mover"]):
+            beneficios_tipo = (
+                s["cloud_computing"]["para_quien"].get("pymes", [])
+                if tipo == "pyme"
+                else s["cloud_computing"]["para_quien"].get("corporativos", [])
+            )
+            recomendaciones.append({
+                "servicio": "Servicios en la Nube",
+                "razon": "GoToCloud ha migrado más de 500 servidores a Azure con 0 horas de downtime.",
+                "beneficios": beneficios_tipo,
+            })
+        if any(k in necesidad for k in ["ia", "inteligencia artificial", "automatiz"]):
+            recomendaciones.append({
+                "servicio": "OASIS AI + Modernización de Aplicaciones con IA",
+                "razon": "GoToCloud tiene especialización avanzada en IA y ML sobre Azure.",
+                "beneficios": s["datos"].get("especializaciones", []),
+            })
+        if any(k in necesidad for k in ["soporte", "administr", "mantenimiento", "operar"]):
+            recomendaciones.append({
+                "servicio": "Servicios Administrados de TI",
+                "razon": "GoToCloud opera la infraestructura 24/7 para que el equipo se enfoque en el negocio.",
+                "beneficios": s["servicios_administrados"].get("beneficios", []),
+            })
+        if not recomendaciones:
+            recomendaciones = [{
+                "servicio": "Consultoría GoToCloud",
+                "razon": "GoToCloud diseña soluciones personalizadas según tu industria y necesidades.",
+                "beneficios": [
+                    "95% de satisfacción del cliente",
+                    "Más de 100 empresas transformadas en Latinoamérica",
+                    "Partner certificado Microsoft con múltiples especializaciones avanzadas",
+                ],
+            }]
+        return {"tipo_empresa": tipo, "necesidad": necesidad or "general", "recomendaciones": recomendaciones}
 
     else:
         return {"error": f"Tool '{nombre}' no reconocida."}
@@ -594,10 +559,13 @@ Tus respuestas SOLO pueden ser sobre GoToCloud y sus servicios. Si alguien pregu
 ## INICIO OBLIGATORIO DE CADA LLAMADA
 Lo primero que debes hacer SIEMPRE, antes de cualquier otra cosa, es:
 1. Saludar y presentarte como Camila de GoToCloud.
-2. Pedir el nombre completo del cliente.
-3. Pedir el número de cédula.
-4. Llamar la tool `registrar_datos_cliente` con esos datos.
-5. Luego preguntar en qué puedes ayudar.
+2. Informar que "esta llamada queda registrada bajo nuestra política de tratamiento de datos personales".
+3. Pedir el nombre completo del cliente.
+4. Pedir el número de cédula.
+5. Pedir el nombre de la empresa u organización donde trabaja.
+6. Pedir un número de teléfono de contacto.
+7. Llamar la tool `registrar_datos_cliente` con todos esos datos.
+8. Luego preguntar en qué puedes ayudar.
 
 ## CÓMO USAR LAS TOOLS
 - Usa SIEMPRE las tools para dar información. No inventes datos.
@@ -617,7 +585,7 @@ Lo primero que debes hacer SIEMPRE, antes de cualquier otra cosa, es:
 - Cuando haya interés real, ofrece conectar por WhatsApp al +57 317 427 0148.
 
 ## FLUJO DE LLAMADA
-1. Saludo + presentación + pedir nombre y cédula + registrar
+1. Saludo + presentación + aviso política de datos + pedir nombre, cédula, empresa y teléfono + registrar
 2. Preguntar necesidad
 3. Identificar tipo de empresa (pyme, corporativo, gobierno)
 4. Usar tool adecuada para dar información precisa
