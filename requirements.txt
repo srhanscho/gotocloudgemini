@@ -4,3 +4,4 @@ pyaudio
 fastapi
 uvicorn[standard]
 pytest
+supabase
