@@ -60,9 +60,27 @@ from .recommendations import execute as ejecutar_obtener_beneficios_para_cliente
 from .call_summary import execute as ejecutar_registrar_resumen_llamada  # noqa: F401, E402
 
 
+# ─────────────────────────────────────────────
+# TOOL_EXECUTORS — dict-based dispatch map
+# Maps tool name → execute(args, session, kb) callable
+# Used by the facade to replace the if/elif chain.
+# ─────────────────────────────────────────────
+TOOL_EXECUTORS: dict[str, Any] = {
+    "registrar_datos_cliente": ejecutar_registrar_datos_cliente,
+    "obtener_informacion_empresa": ejecutar_obtener_informacion_empresa,
+    "obtener_servicios": ejecutar_obtener_servicios,
+    "obtener_producto_saas": ejecutar_obtener_producto_saas,
+    "obtener_metricas": ejecutar_obtener_metricas,
+    "obtener_contacto": ejecutar_obtener_contacto,
+    "obtener_beneficios_para_cliente": ejecutar_obtener_beneficios_para_cliente,
+    "registrar_resumen_llamada": ejecutar_registrar_resumen_llamada,
+}
+
+
 __all__ = [
     "GOTOCLOUD_TOOLS",
     "register_tool",
+    "TOOL_EXECUTORS",
     "ejecutar_registrar_datos_cliente",
     "ejecutar_obtener_informacion_empresa",
     "ejecutar_obtener_servicios",
