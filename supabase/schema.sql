@@ -97,12 +97,12 @@ COMMENT ON TABLE public.llamadas IS 'Metadata de llamadas: resumen, intención, 
 --  New tables added alongside existing ones (no modifications to existing tables)
 -- =============================================================
 
--- 1.1 PostgreSQL Enums
-CREATE TYPE channel_type AS ENUM ('voice', 'whatsapp', 'telegram', 'webchat', 'sms');
-CREATE TYPE thread_status AS ENUM ('active', 'closed', 'archived');
-CREATE TYPE session_status AS ENUM ('active', 'completed', 'failed');
-CREATE TYPE message_sender AS ENUM ('user', 'agent', 'system');
-CREATE TYPE contact_role AS ENUM ('lead', 'client', 'employee', 'vendor', 'prospect');
+-- 1.1 PostgreSQL Enums (con guard IF NOT EXISTS vía DO block)
+DO $$ BEGIN CREATE TYPE channel_type AS ENUM ('voice', 'whatsapp', 'telegram', 'webchat', 'sms'); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE TYPE thread_status AS ENUM ('active', 'closed', 'archived'); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE TYPE session_status AS ENUM ('active', 'completed', 'failed'); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE TYPE message_sender AS ENUM ('user', 'agent', 'system'); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE TYPE contact_role AS ENUM ('lead', 'client', 'employee', 'vendor', 'prospect'); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- 1.15 pgvector extension
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -238,45 +238,46 @@ CREATE TABLE IF NOT EXISTS public.analytics_events (
 );
 
 -- 1.14 Indexes (BTREE + GIN for JSONB + vector index)
+-- Todos con IF NOT EXISTS para ejecución idempotente
 
 -- BTREE indexes on FK columns
-CREATE INDEX idx_contact_companies_contact_id ON public.contact_companies(contact_id);
-CREATE INDEX idx_contact_companies_company_id ON public.contact_companies(company_id);
-CREATE INDEX idx_channel_identities_contact_id ON public.channel_identities(contact_id);
-CREATE INDEX idx_conversation_threads_company_id ON public.conversation_threads(company_id);
-CREATE INDEX idx_conversation_threads_contact_id ON public.conversation_threads(contact_id);
-CREATE INDEX idx_conversation_threads_status ON public.conversation_threads(status);
-CREATE INDEX idx_conversation_sessions_thread_id ON public.conversation_sessions(thread_id);
-CREATE INDEX idx_conversation_sessions_channel_identity_id ON public.conversation_sessions(channel_identity_id);
-CREATE INDEX idx_conversation_sessions_status ON public.conversation_sessions(status);
-CREATE INDEX idx_messages_session_id ON public.messages(session_id);
-CREATE INDEX idx_messages_sender ON public.messages(sender);
-CREATE INDEX idx_memory_summaries_thread_id ON public.memory_summaries(thread_id);
-CREATE INDEX idx_memory_embeddings_thread_id ON public.memory_embeddings(thread_id);
-CREATE INDEX idx_memory_embeddings_message_id ON public.memory_embeddings(message_id);
-CREATE INDEX idx_agents_company_id ON public.agents(company_id);
-CREATE INDEX idx_agent_tools_agent_id ON public.agent_tools(agent_id);
-CREATE INDEX idx_analytics_events_thread_id ON public.analytics_events(thread_id);
-CREATE INDEX idx_analytics_events_session_id ON public.analytics_events(session_id);
+CREATE INDEX IF NOT EXISTS idx_contact_companies_contact_id ON public.contact_companies(contact_id);
+CREATE INDEX IF NOT EXISTS idx_contact_companies_company_id ON public.contact_companies(company_id);
+CREATE INDEX IF NOT EXISTS idx_channel_identities_contact_id ON public.channel_identities(contact_id);
+CREATE INDEX IF NOT EXISTS idx_conversation_threads_company_id ON public.conversation_threads(company_id);
+CREATE INDEX IF NOT EXISTS idx_conversation_threads_contact_id ON public.conversation_threads(contact_id);
+CREATE INDEX IF NOT EXISTS idx_conversation_threads_status ON public.conversation_threads(status);
+CREATE INDEX IF NOT EXISTS idx_conversation_sessions_thread_id ON public.conversation_sessions(thread_id);
+CREATE INDEX IF NOT EXISTS idx_conversation_sessions_channel_identity_id ON public.conversation_sessions(channel_identity_id);
+CREATE INDEX IF NOT EXISTS idx_conversation_sessions_status ON public.conversation_sessions(status);
+CREATE INDEX IF NOT EXISTS idx_messages_session_id ON public.messages(session_id);
+CREATE INDEX IF NOT EXISTS idx_messages_sender ON public.messages(sender);
+CREATE INDEX IF NOT EXISTS idx_memory_summaries_thread_id ON public.memory_summaries(thread_id);
+CREATE INDEX IF NOT EXISTS idx_memory_embeddings_thread_id ON public.memory_embeddings(thread_id);
+CREATE INDEX IF NOT EXISTS idx_memory_embeddings_message_id ON public.memory_embeddings(message_id);
+CREATE INDEX IF NOT EXISTS idx_agents_company_id ON public.agents(company_id);
+CREATE INDEX IF NOT EXISTS idx_agent_tools_agent_id ON public.agent_tools(agent_id);
+CREATE INDEX IF NOT EXISTS idx_analytics_events_thread_id ON public.analytics_events(thread_id);
+CREATE INDEX IF NOT EXISTS idx_analytics_events_session_id ON public.analytics_events(session_id);
 
 -- Composite indexes
-CREATE UNIQUE INDEX idx_channel_identities_channel_external ON public.channel_identities(channel_type, external_id);
-CREATE INDEX idx_messages_session_created ON public.messages(session_id, created_at DESC);
-CREATE INDEX idx_analytics_events_type_created ON public.analytics_events(event_type, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_identities_channel_external ON public.channel_identities(channel_type, external_id);
+CREATE INDEX IF NOT EXISTS idx_messages_session_created ON public.messages(session_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_analytics_events_type_created ON public.analytics_events(event_type, created_at DESC);
 
 -- GIN indexes for arrays and JSONB
-CREATE INDEX idx_contacts_emails_gin ON public.contacts USING GIN(emails);
-CREATE INDEX idx_contacts_phones_gin ON public.contacts USING GIN(phones);
-CREATE INDEX idx_contacts_metadata_gin ON public.contacts USING GIN(metadata);
-CREATE INDEX idx_channel_identities_profile_gin ON public.channel_identities USING GIN(profile_data);
-CREATE INDEX idx_conversation_threads_metadata_gin ON public.conversation_threads USING GIN(metadata);
-CREATE INDEX idx_messages_metadata_gin ON public.messages USING GIN(metadata);
-CREATE INDEX idx_agents_config_gin ON public.agents USING GIN(config);
-CREATE INDEX idx_agent_tools_schema_gin ON public.agent_tools USING GIN(tool_schema);
-CREATE INDEX idx_analytics_events_payload_gin ON public.analytics_events USING GIN(payload);
+CREATE INDEX IF NOT EXISTS idx_contacts_emails_gin ON public.contacts USING GIN(emails);
+CREATE INDEX IF NOT EXISTS idx_contacts_phones_gin ON public.contacts USING GIN(phones);
+CREATE INDEX IF NOT EXISTS idx_contacts_metadata_gin ON public.contacts USING GIN(metadata);
+CREATE INDEX IF NOT EXISTS idx_channel_identities_profile_gin ON public.channel_identities USING GIN(profile_data);
+CREATE INDEX IF NOT EXISTS idx_conversation_threads_metadata_gin ON public.conversation_threads USING GIN(metadata);
+CREATE INDEX IF NOT EXISTS idx_messages_metadata_gin ON public.messages USING GIN(metadata);
+CREATE INDEX IF NOT EXISTS idx_agents_config_gin ON public.agents USING GIN(config);
+CREATE INDEX IF NOT EXISTS idx_agent_tools_schema_gin ON public.agent_tools USING GIN(tool_schema);
+CREATE INDEX IF NOT EXISTS idx_analytics_events_payload_gin ON public.analytics_events USING GIN(payload);
 
 -- Vector index (IVFFlat placeholder)
-CREATE INDEX idx_memory_embeddings_vector_ivfflat ON public.memory_embeddings USING ivfflat(embedding vector_cosine_ops) WITH (lists = 100);
+CREATE INDEX IF NOT EXISTS idx_memory_embeddings_vector_ivfflat ON public.memory_embeddings USING ivfflat(embedding vector_cosine_ops) WITH (lists = 100);
 
 -- =============================================================
 --  Permisos: habilitar acceso anónimo (lectura/escritura)
@@ -363,19 +364,31 @@ ALTER TABLE public.agents ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.agent_tools ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.analytics_events ENABLE ROW LEVEL SECURITY;
 
--- anon SELECT policies for new tables
+-- anon policies for new tables (drop all before recreate)
 DROP POLICY IF EXISTS "anon_select_companies" ON public.companies;
+DROP POLICY IF EXISTS "anon_insert_companies" ON public.companies;
 DROP POLICY IF EXISTS "anon_select_contacts" ON public.contacts;
+DROP POLICY IF EXISTS "anon_insert_contacts" ON public.contacts;
 DROP POLICY IF EXISTS "anon_select_contact_companies" ON public.contact_companies;
+DROP POLICY IF EXISTS "anon_insert_contact_companies" ON public.contact_companies;
 DROP POLICY IF EXISTS "anon_select_channel_identities" ON public.channel_identities;
+DROP POLICY IF EXISTS "anon_insert_channel_identities" ON public.channel_identities;
 DROP POLICY IF EXISTS "anon_select_conversation_threads" ON public.conversation_threads;
+DROP POLICY IF EXISTS "anon_insert_conversation_threads" ON public.conversation_threads;
 DROP POLICY IF EXISTS "anon_select_conversation_sessions" ON public.conversation_sessions;
+DROP POLICY IF EXISTS "anon_insert_conversation_sessions" ON public.conversation_sessions;
 DROP POLICY IF EXISTS "anon_select_messages" ON public.messages;
+DROP POLICY IF EXISTS "anon_insert_messages" ON public.messages;
 DROP POLICY IF EXISTS "anon_select_memory_summaries" ON public.memory_summaries;
+DROP POLICY IF EXISTS "anon_insert_memory_summaries" ON public.memory_summaries;
 DROP POLICY IF EXISTS "anon_select_memory_embeddings" ON public.memory_embeddings;
+DROP POLICY IF EXISTS "anon_insert_memory_embeddings" ON public.memory_embeddings;
 DROP POLICY IF EXISTS "anon_select_agents" ON public.agents;
+DROP POLICY IF EXISTS "anon_insert_agents" ON public.agents;
 DROP POLICY IF EXISTS "anon_select_agent_tools" ON public.agent_tools;
+DROP POLICY IF EXISTS "anon_insert_agent_tools" ON public.agent_tools;
 DROP POLICY IF EXISTS "anon_select_analytics_events" ON public.analytics_events;
+DROP POLICY IF EXISTS "anon_insert_analytics_events" ON public.analytics_events;
 
 CREATE POLICY "anon_select_companies" ON public.companies FOR SELECT USING (true);
 CREATE POLICY "anon_insert_companies" ON public.companies FOR INSERT WITH CHECK (true);
