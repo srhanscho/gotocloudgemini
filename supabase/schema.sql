@@ -93,6 +93,192 @@ CREATE TABLE IF NOT EXISTS public.llamadas (
 COMMENT ON TABLE public.llamadas IS 'Metadata de llamadas: resumen, intención, score, servicios de interés';
 
 -- =============================================================
+--  Multi-Channel AI Agent Platform — Phase 1: Database Foundation
+--  New tables added alongside existing ones (no modifications to existing tables)
+-- =============================================================
+
+-- 1.1 PostgreSQL Enums
+CREATE TYPE channel_type AS ENUM ('voice', 'whatsapp', 'telegram', 'webchat', 'sms');
+CREATE TYPE thread_status AS ENUM ('active', 'closed', 'archived');
+CREATE TYPE session_status AS ENUM ('active', 'completed', 'failed');
+CREATE TYPE message_sender AS ENUM ('user', 'agent', 'system');
+CREATE TYPE contact_role AS ENUM ('lead', 'client', 'employee', 'vendor', 'prospect');
+
+-- 1.15 pgvector extension
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- 1.2 Companies (multi-tenant)
+CREATE TABLE IF NOT EXISTS public.companies (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL,
+    settings JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- 1.3 Contacts (unified identity with emails TEXT[], phones TEXT[])
+CREATE TABLE IF NOT EXISTS public.contacts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT,
+    emails TEXT[] DEFAULT '{}'::text[],
+    phones TEXT[] DEFAULT '{}'::text[],
+    metadata JSONB DEFAULT '{}'::jsonb,
+    unified TSTZRANGE,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- 1.5 Contact-Companies (many-to-many with role enum)
+CREATE TABLE IF NOT EXISTS public.contact_companies (
+    contact_id UUID NOT NULL REFERENCES public.contacts(id) ON DELETE CASCADE,
+    company_id UUID NOT NULL REFERENCES public.companies(id) ON DELETE CASCADE,
+    role contact_role DEFAULT 'client',
+    created_at TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (contact_id, company_id)
+);
+
+-- 1.4 Channel Identities (per-channel profiles)
+CREATE TABLE IF NOT EXISTS public.channel_identities (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    contact_id UUID NOT NULL REFERENCES public.contacts(id) ON DELETE CASCADE,
+    channel_type channel_type NOT NULL,
+    external_id TEXT NOT NULL,
+    profile_data JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    UNIQUE(channel_type, external_id)
+);
+
+-- 1.6 Conversation Threads (global threads)
+CREATE TABLE IF NOT EXISTS public.conversation_threads (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    company_id UUID REFERENCES public.companies(id) ON DELETE CASCADE,
+    contact_id UUID REFERENCES public.contacts(id) ON DELETE CASCADE,
+    status thread_status DEFAULT 'active',
+    topic TEXT,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- 1.7 Conversation Sessions (per-channel sessions)
+CREATE TABLE IF NOT EXISTS public.conversation_sessions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    thread_id UUID REFERENCES public.conversation_threads(id) ON DELETE CASCADE,
+    channel_type channel_type NOT NULL,
+    channel_identity_id UUID REFERENCES public.channel_identities(id) ON DELETE SET NULL,
+    status session_status DEFAULT 'active',
+    started_at TIMESTAMPTZ DEFAULT now(),
+    ended_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- 1.8 Messages (with metadata JSONB)
+CREATE TABLE IF NOT EXISTS public.messages (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id UUID REFERENCES public.conversation_sessions(id) ON DELETE CASCADE,
+    sender message_sender NOT NULL,
+    content TEXT,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- 1.9 Memory Summaries (persistent summaries)
+CREATE TABLE IF NOT EXISTS public.memory_summaries (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    thread_id UUID REFERENCES public.conversation_threads(id) ON DELETE CASCADE,
+    summary_text TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- 1.10 Memory Embeddings (pgvector)
+CREATE TABLE IF NOT EXISTS public.memory_embeddings (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    thread_id UUID REFERENCES public.conversation_threads(id) ON DELETE CASCADE,
+    message_id UUID REFERENCES public.messages(id) ON DELETE CASCADE,
+    content_chunk TEXT NOT NULL,
+    embedding vector(1536) NOT NULL,
+    model TEXT DEFAULT 'text-embedding-3-small',
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- 1.11 Agents (agent registry)
+CREATE TABLE IF NOT EXISTS public.agents (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    company_id UUID REFERENCES public.companies(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    model TEXT NOT NULL,
+    system_prompt TEXT,
+    config JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- 1.12 Agent Tools (tool registry per agent)
+CREATE TABLE IF NOT EXISTS public.agent_tools (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_id UUID REFERENCES public.agents(id) ON DELETE CASCADE,
+    tool_name TEXT NOT NULL,
+    tool_schema JSONB DEFAULT '{}'::jsonb,
+    handler_path TEXT,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- 1.13 Analytics Events (audit/analytics)
+CREATE TABLE IF NOT EXISTS public.analytics_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    thread_id UUID REFERENCES public.conversation_threads(id) ON DELETE SET NULL,
+    session_id UUID REFERENCES public.conversation_sessions(id) ON DELETE SET NULL,
+    event_type TEXT NOT NULL,
+    payload JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- 1.14 Indexes (BTREE + GIN for JSONB + vector index)
+
+-- BTREE indexes on FK columns
+CREATE INDEX idx_contact_companies_contact_id ON public.contact_companies(contact_id);
+CREATE INDEX idx_contact_companies_company_id ON public.contact_companies(company_id);
+CREATE INDEX idx_channel_identities_contact_id ON public.channel_identities(contact_id);
+CREATE INDEX idx_conversation_threads_company_id ON public.conversation_threads(company_id);
+CREATE INDEX idx_conversation_threads_contact_id ON public.conversation_threads(contact_id);
+CREATE INDEX idx_conversation_threads_status ON public.conversation_threads(status);
+CREATE INDEX idx_conversation_sessions_thread_id ON public.conversation_sessions(thread_id);
+CREATE INDEX idx_conversation_sessions_channel_identity_id ON public.conversation_sessions(channel_identity_id);
+CREATE INDEX idx_conversation_sessions_status ON public.conversation_sessions(status);
+CREATE INDEX idx_messages_session_id ON public.messages(session_id);
+CREATE INDEX idx_messages_sender ON public.messages(sender);
+CREATE INDEX idx_memory_summaries_thread_id ON public.memory_summaries(thread_id);
+CREATE INDEX idx_memory_embeddings_thread_id ON public.memory_embeddings(thread_id);
+CREATE INDEX idx_memory_embeddings_message_id ON public.memory_embeddings(message_id);
+CREATE INDEX idx_agents_company_id ON public.agents(company_id);
+CREATE INDEX idx_agent_tools_agent_id ON public.agent_tools(agent_id);
+CREATE INDEX idx_analytics_events_thread_id ON public.analytics_events(thread_id);
+CREATE INDEX idx_analytics_events_session_id ON public.analytics_events(session_id);
+
+-- Composite indexes
+CREATE UNIQUE INDEX idx_channel_identities_channel_external ON public.channel_identities(channel_type, external_id);
+CREATE INDEX idx_messages_session_created ON public.messages(session_id, created_at DESC);
+CREATE INDEX idx_analytics_events_type_created ON public.analytics_events(event_type, created_at DESC);
+
+-- GIN indexes for arrays and JSONB
+CREATE INDEX idx_contacts_emails_gin ON public.contacts USING GIN(emails);
+CREATE INDEX idx_contacts_phones_gin ON public.contacts USING GIN(phones);
+CREATE INDEX idx_contacts_metadata_gin ON public.contacts USING GIN(metadata);
+CREATE INDEX idx_channel_identities_profile_gin ON public.channel_identities USING GIN(profile_data);
+CREATE INDEX idx_conversation_threads_metadata_gin ON public.conversation_threads USING GIN(metadata);
+CREATE INDEX idx_messages_metadata_gin ON public.messages USING GIN(metadata);
+CREATE INDEX idx_agents_config_gin ON public.agents USING GIN(config);
+CREATE INDEX idx_agent_tools_schema_gin ON public.agent_tools USING GIN(tool_schema);
+CREATE INDEX idx_analytics_events_payload_gin ON public.analytics_events USING GIN(payload);
+
+-- Vector index (IVFFlat placeholder)
+CREATE INDEX idx_memory_embeddings_vector_ivfflat ON public.memory_embeddings USING ivfflat(embedding vector_cosine_ops) WITH (lists = 100);
+
+-- =============================================================
 --  Permisos: habilitar acceso anónimo (lectura/escritura)
 --  NOTA: Ajustar según necesidad de seguridad en producción
 -- =============================================================
@@ -162,6 +348,59 @@ CREATE POLICY "anon_insert_productos_saas" ON public.productos_saas
     FOR INSERT WITH CHECK (true);
 CREATE POLICY "anon_upsert_productos_saas" ON public.productos_saas
     FOR UPDATE USING (true) WITH CHECK (true);
+
+-- RLS policies for new multi-channel tables (matching existing pattern)
+ALTER TABLE public.companies ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.contacts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.contact_companies ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.channel_identities ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.conversation_threads ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.conversation_sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.messages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.memory_summaries ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.memory_embeddings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.agents ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.agent_tools ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.analytics_events ENABLE ROW LEVEL SECURITY;
+
+-- anon SELECT policies for new tables
+DROP POLICY IF EXISTS "anon_select_companies" ON public.companies;
+DROP POLICY IF EXISTS "anon_select_contacts" ON public.contacts;
+DROP POLICY IF EXISTS "anon_select_contact_companies" ON public.contact_companies;
+DROP POLICY IF EXISTS "anon_select_channel_identities" ON public.channel_identities;
+DROP POLICY IF EXISTS "anon_select_conversation_threads" ON public.conversation_threads;
+DROP POLICY IF EXISTS "anon_select_conversation_sessions" ON public.conversation_sessions;
+DROP POLICY IF EXISTS "anon_select_messages" ON public.messages;
+DROP POLICY IF EXISTS "anon_select_memory_summaries" ON public.memory_summaries;
+DROP POLICY IF EXISTS "anon_select_memory_embeddings" ON public.memory_embeddings;
+DROP POLICY IF EXISTS "anon_select_agents" ON public.agents;
+DROP POLICY IF EXISTS "anon_select_agent_tools" ON public.agent_tools;
+DROP POLICY IF EXISTS "anon_select_analytics_events" ON public.analytics_events;
+
+CREATE POLICY "anon_select_companies" ON public.companies FOR SELECT USING (true);
+CREATE POLICY "anon_insert_companies" ON public.companies FOR INSERT WITH CHECK (true);
+CREATE POLICY "anon_select_contacts" ON public.contacts FOR SELECT USING (true);
+CREATE POLICY "anon_insert_contacts" ON public.contacts FOR INSERT WITH CHECK (true);
+CREATE POLICY "anon_select_contact_companies" ON public.contact_companies FOR SELECT USING (true);
+CREATE POLICY "anon_insert_contact_companies" ON public.contact_companies FOR INSERT WITH CHECK (true);
+CREATE POLICY "anon_select_channel_identities" ON public.channel_identities FOR SELECT USING (true);
+CREATE POLICY "anon_insert_channel_identities" ON public.channel_identities FOR INSERT WITH CHECK (true);
+CREATE POLICY "anon_select_conversation_threads" ON public.conversation_threads FOR SELECT USING (true);
+CREATE POLICY "anon_insert_conversation_threads" ON public.conversation_threads FOR INSERT WITH CHECK (true);
+CREATE POLICY "anon_select_conversation_sessions" ON public.conversation_sessions FOR SELECT USING (true);
+CREATE POLICY "anon_insert_conversation_sessions" ON public.conversation_sessions FOR INSERT WITH CHECK (true);
+CREATE POLICY "anon_select_messages" ON public.messages FOR SELECT USING (true);
+CREATE POLICY "anon_insert_messages" ON public.messages FOR INSERT WITH CHECK (true);
+CREATE POLICY "anon_select_memory_summaries" ON public.memory_summaries FOR SELECT USING (true);
+CREATE POLICY "anon_insert_memory_summaries" ON public.memory_summaries FOR INSERT WITH CHECK (true);
+CREATE POLICY "anon_select_memory_embeddings" ON public.memory_embeddings FOR SELECT USING (true);
+CREATE POLICY "anon_insert_memory_embeddings" ON public.memory_embeddings FOR INSERT WITH CHECK (true);
+CREATE POLICY "anon_select_agents" ON public.agents FOR SELECT USING (true);
+CREATE POLICY "anon_insert_agents" ON public.agents FOR INSERT WITH CHECK (true);
+CREATE POLICY "anon_select_agent_tools" ON public.agent_tools FOR SELECT USING (true);
+CREATE POLICY "anon_insert_agent_tools" ON public.agent_tools FOR INSERT WITH CHECK (true);
+CREATE POLICY "anon_select_analytics_events" ON public.analytics_events FOR SELECT USING (true);
+CREATE POLICY "anon_insert_analytics_events" ON public.analytics_events FOR INSERT WITH CHECK (true);
 
 -- =============================================================
 --  Seed data (INSERT con ON CONFLICT para ser idempotente)
@@ -302,4 +541,28 @@ UNION ALL
 SELECT 'productos_saas', COUNT(*) FROM public.productos_saas
 UNION ALL
 SELECT 'clientes', COUNT(*) FROM public.clientes
+UNION ALL
+SELECT 'companies', COUNT(*) FROM public.companies
+UNION ALL
+SELECT 'contacts', COUNT(*) FROM public.contacts
+UNION ALL
+SELECT 'contact_companies', COUNT(*) FROM public.contact_companies
+UNION ALL
+SELECT 'channel_identities', COUNT(*) FROM public.channel_identities
+UNION ALL
+SELECT 'conversation_threads', COUNT(*) FROM public.conversation_threads
+UNION ALL
+SELECT 'conversation_sessions', COUNT(*) FROM public.conversation_sessions
+UNION ALL
+SELECT 'messages', COUNT(*) FROM public.messages
+UNION ALL
+SELECT 'memory_summaries', COUNT(*) FROM public.memory_summaries
+UNION ALL
+SELECT 'memory_embeddings', COUNT(*) FROM public.memory_embeddings
+UNION ALL
+SELECT 'agents', COUNT(*) FROM public.agents
+UNION ALL
+SELECT 'agent_tools', COUNT(*) FROM public.agent_tools
+UNION ALL
+SELECT 'analytics_events', COUNT(*) FROM public.analytics_events
 ORDER BY tabla;

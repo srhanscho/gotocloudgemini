@@ -13,6 +13,9 @@ from fastapi.responses import Response
 
 from .gemini_live_client import GeminiLiveClient
 from .audio_codec import gemini_pcm_to_twilio_payload, twilio_payload_to_gemini_pcm
+from .event_bus import EventBus
+from .agent_orchestrator import AgentOrchestrator
+from .channel_adapter import ChannelAdapterFactory, ChannelType
 
 try:
     from service.gotocloud_voicebot_tool import (
@@ -38,6 +41,24 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Twilio ↔ Gemini Live Bridge")
 
+# Multi-channel infrastructure lifecycle
+event_bus = EventBus()
+orchestrator = AgentOrchestrator(event_bus=event_bus)
+
+
+@app.on_event("startup")
+async def startup():
+    await event_bus.start()
+    await orchestrator.start()
+    logger.info("Multi-channel infrastructure started")
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    await orchestrator.stop()
+    await event_bus.stop()
+    logger.info("Multi-channel infrastructure stopped")
+
 TWIML_TEMPLATE = """\
 <?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -59,7 +80,12 @@ def _stream_url() -> str:
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "event_bus": "running",
+        "orchestrator": "ready",
+        "channels": ChannelAdapterFactory.list_channels(),
+    }
 
 
 @app.get("/twiml")
