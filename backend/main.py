@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent / ".env")
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 
 from .gemini_live_client import GeminiLiveClient
@@ -33,6 +34,19 @@ except ImportError:
         "service/gotocloud_voicebot_tool.py no encontrado — corriendo sin tools"
     )
 
+try:
+    from .text_agent_client import TextAgentSession
+    TEXT_AGENT_AVAILABLE = True
+except ImportError:
+    TextAgentSession = None  # type: ignore[assignment]
+    TEXT_AGENT_AVAILABLE = False
+    logging.getLogger(__name__).warning(
+        "text_agent_client.py no disponible — endpoint /chat/message deshabilitado"
+    )
+
+# Sesiones activas del agente de texto
+_sessions: dict[str, TextAgentSession] = {}
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s — %(message)s",
@@ -40,6 +54,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Twilio ↔ Gemini Live Bridge")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Multi-channel infrastructure lifecycle
 event_bus = EventBus()
@@ -85,6 +107,62 @@ async def health():
         "event_bus": "running",
         "orchestrator": "ready",
         "channels": ChannelAdapterFactory.list_channels(),
+    }
+
+
+@app.post("/chat/message")
+async def chat_message(request: dict):
+    """Endpoint de chat textual — usado por el frontend (ChatbotWidget)."""
+    if not TEXT_AGENT_AVAILABLE:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Text agent no disponible — verificá GEMINI_API_KEY"},
+        )
+
+    message = (request.get("message") or "").strip()
+    session_id = request.get("session_id")
+    model = request.get("model")
+
+    if not message:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=422,
+            content={"detail": "El campo 'message' es obligatorio"},
+        )
+
+    # Recuperar o crear sesión
+    if session_id and session_id in _sessions:
+        session = _sessions[session_id]
+    else:
+        session = TextAgentSession(model=model)
+        _sessions[session.session_id] = session
+        session_id = session.session_id
+
+    try:
+        result = await session.send_message(message)
+    except Exception as exc:
+        error_msg = str(exc)
+        logger.error(f"Text agent error: {error_msg}")
+        from fastapi.responses import JSONResponse
+
+        status = 500
+        if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
+            status = 429
+            error_msg = (
+                "Límite de uso de la API alcanzado. "
+                "Intentá de nuevo en unos segundos."
+            )
+        elif "API_KEY" in error_msg or "API key" in error_msg:
+            status = 401
+
+        return JSONResponse(status_code=status, content={"detail": error_msg})
+
+    return {
+        "session_id": session_id,
+        "reply": result["reply"],
+        "tool_calls": result["tool_calls"],
+        "ended": result["ended"],
     }
 
 
