@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent / ".env")
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 
 from .gemini_live_client import GeminiLiveClient
@@ -34,10 +34,13 @@ except ImportError:
     )
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s %(levelname)s %(name)s — %(message)s",
 )
 logger = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("watchfiles").setLevel(logging.WARNING)
 
 app = FastAPI(title="Twilio ↔ Gemini Live Bridge")
 
@@ -90,11 +93,14 @@ async def health():
 
 @app.get("/twiml")
 @app.post("/twiml")
-async def twiml():
+async def twiml(request: Request):
+    logger.info(f"[TWIML] Request from {request.client} method={request.method} headers={dict(request.headers)}")
     try:
         stream_url = _stream_url()
     except ValueError as exc:
+        logger.error(f"[TWIML] Error: {exc}")
         return Response(content=str(exc), status_code=500, media_type="text/plain")
+    logger.info(f"[TWIML] Responding with stream_url={stream_url}")
     return Response(
         content=TWIML_TEMPLATE.format(stream_url=stream_url),
         media_type="application/xml",
@@ -103,10 +109,12 @@ async def twiml():
 
 @app.websocket("/twilio-stream")
 async def twilio_stream(websocket: WebSocket):
+    logger.info(f"[WS] WebSocket connection attempt from {websocket.client}")
     await websocket.accept()
-    logger.info("Twilio connected")
+    logger.info("[WS] WebSocket accepted — Twilio connected")
 
     gemini = GeminiLiveClient()
+    logger.info("[WS] Connecting to Gemini Live...")
     await gemini.connect(
         tools=GOTOCLOUD_TOOLS,
         tool_handler=ejecutar_tool,
@@ -238,3 +246,114 @@ async def twilio_stream(websocket: WebSocket):
         await asyncio.gather(*tasks, return_exceptions=True)
         await gemini.close()
         logger.info("Gemini session closed")
+
+
+# ─────────────────────────────────────────────────────────────
+# WEB CLIENT — WebSocket para frontend web (sin Twilio)
+# ─────────────────────────────────────────────────────────────
+#
+# PROTOCOLO:
+#   Browser → Server : frames BINARIOS — PCM16 LE 16kHz (raw bytes del micrófono)
+#   Server → Browser : frames BINARIOS — PCM16 LE 24kHz (audio de Gemini)
+#                      frames TEXTO    — JSON con eventos:
+#                        {"type": "status",     "value": "connected|listening|speaking|ended"}
+#                        {"type": "transcript", "role": "user|model", "text": "..."}
+#                        {"type": "tool",       "name": "...", "result": {...}}
+#                        {"type": "error",      "message": "..."}
+# ─────────────────────────────────────────────────────────────
+
+async def _ws_send_json(ws: WebSocket, payload: dict):
+    """Helper para enviar un frame JSON de texto al browser."""
+    try:
+        await ws.send_text(json.dumps(payload, ensure_ascii=False))
+    except Exception:
+        pass
+
+
+@app.websocket("/web-stream")
+async def web_stream(websocket: WebSocket):
+    await websocket.accept()
+    logger.info("[WEB] Browser conectado")
+
+    await _ws_send_json(websocket, {"type": "status", "value": "connected"})
+
+    gemini = GeminiLiveClient()
+
+    # Wrapper del tool handler que también notifica al browser
+    async def tool_handler_web(nombre: str, args: dict):
+        result = ejecutar_tool(nombre, args) if ejecutar_tool else {"error": "tools no disponibles"}
+        await _ws_send_json(websocket, {"type": "tool", "name": nombre, "result": result})
+        return result
+
+    try:
+        await gemini.connect(
+            tools=GOTOCLOUD_TOOLS,
+            tool_handler=ejecutar_tool,
+            system_instruction=SYSTEM_PROMPT,
+            voice_name="Aoede",
+        )
+    except Exception as exc:
+        logger.error(f"[WEB] Error conectando Gemini: {exc}")
+        await _ws_send_json(websocket, {"type": "error", "message": str(exc)})
+        await websocket.close()
+        return
+
+    logger.info("[WEB] Gemini Live conectado")
+    await _ws_send_json(websocket, {"type": "status", "value": "listening"})
+
+    stop_event = asyncio.Event()
+
+    async def receive_from_browser():
+        """Recibe audio PCM16 16kHz del browser y lo envía a Gemini."""
+        try:
+            while not stop_event.is_set():
+                data = await websocket.receive()
+                if data["type"] == "websocket.disconnect":
+                    stop_event.set()
+                    break
+                if "bytes" in data and data["bytes"]:
+                    await gemini.send_audio_pcm16_16k(data["bytes"])
+                elif "text" in data and data["text"]:
+                    msg = json.loads(data["text"])
+                    if msg.get("type") == "stop":
+                        logger.info("[WEB] Browser envió stop")
+                        stop_event.set()
+                        break
+        except WebSocketDisconnect:
+            logger.info("[WEB] Browser desconectado")
+            stop_event.set()
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.error(f"[WEB] receive_from_browser error: {exc}")
+            stop_event.set()
+
+    async def send_to_browser():
+        """Recibe audio PCM16 24kHz de Gemini y lo envía al browser."""
+        try:
+            while not stop_event.is_set():
+                await _ws_send_json(websocket, {"type": "status", "value": "speaking"})
+                async for pcm_chunk in gemini.receive_audio():
+                    if stop_event.is_set():
+                        break
+                    await websocket.send_bytes(pcm_chunk)
+                await _ws_send_json(websocket, {"type": "status", "value": "listening"})
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.error(f"[WEB] send_to_browser error: {exc}")
+            stop_event.set()
+
+    tasks = [
+        asyncio.create_task(receive_from_browser(), name="web_recv"),
+        asyncio.create_task(send_to_browser(),      name="web_send"),
+    ]
+    try:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await gemini.close()
+        await _ws_send_json(websocket, {"type": "status", "value": "ended"})
+        logger.info("[WEB] Sesión cerrada")
